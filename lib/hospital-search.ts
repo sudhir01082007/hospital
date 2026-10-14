@@ -101,13 +101,52 @@ export function isPincode(input: string): boolean {
 // ─── Supabase row → Hospital mapper ───────────────────────────────────────────
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function mapRow(row: Record<string, any>): Hospital {
+export function mapRow(row: Record<string, any>): Hospital {
+  const district = row.district ?? row.district_name ?? ''
+  const location = row.location ?? row.city ?? (district ? `${district}, Tamil Nadu` : '')
+  const type =
+    row.type && String(row.type).trim() !== '' && String(row.type).trim().toLowerCase() !== 'null'
+      ? String(row.type).trim()
+      : 'Healthcare Facility'
+  const address = row.address ?? row.full_address ?? (district ? `${district}, Tamil Nadu` : '')
+  const phone = row.phone ?? row.contact_phone ?? ''
+
+  let departments: string[] = []
+  if (Array.isArray(row.departments)) {
+    departments = row.departments.filter(Boolean).map(String)
+  } else if (typeof row.departments === 'string' && row.departments.trim()) {
+    try {
+      const parsed = JSON.parse(row.departments)
+      if (Array.isArray(parsed)) departments = parsed.filter(Boolean).map(String)
+      else departments = row.departments.split(',').map((d: string) => d.trim()).filter(Boolean)
+    } catch {
+      departments = row.departments.split(',').map((d: string) => d.trim()).filter(Boolean)
+    }
+  }
+
+  let doctors = Array.isArray(row.doctors) ? row.doctors : []
+  if (!doctors.length && typeof row.doctors === 'string' && row.doctors.trim()) {
+    try {
+      const parsed = JSON.parse(row.doctors)
+      if (Array.isArray(parsed)) doctors = parsed
+    } catch {
+      doctors = []
+    }
+  }
+
+  const name = row.name ?? row.hospital_name ?? 'Unknown Hospital'
+  const isErFacility = /emergency|trauma|critical\s*care|medical\s*college|general\s*hospital|super\s*speciality/i.test(`${name} ${type}`)
+  const emergency = Boolean(row.emergency ?? row.has_emergency ?? isErFacility)
+
   return {
     id: String(row.id ?? row.hospital_id ?? `sb-${Math.random()}`),
-    name: row.name ?? row.hospital_name ?? 'Unknown Hospital',
-    location: row.location ?? row.area ?? row.district ?? '',
+    name: name,
+    location: location,
+    district: district,
+    city: row.city ?? '',
+    pincode: row.pincode ?? row.pin_code ?? '',
     distance: Number(row.distance ?? row.distance_km ?? 0),
-    type: row.type ?? row.hospital_type ?? 'Hospital',
+    type: type,
     resource: {
       availableBeds: Number(row.available_beds ?? row.availableBeds ?? 0),
       icuBeds: Number(row.icu_beds ?? row.icuBeds ?? 0),
@@ -116,28 +155,27 @@ function mapRow(row: Record<string, any>): Hospital {
       oxygenBeds: Number(row.oxygen_beds ?? row.oxygenBeds ?? 0),
       ventilatorBeds: Number(row.ventilator_beds ?? row.ventilatorBeds ?? 0),
     },
-    emergency: Boolean(row.emergency ?? row.has_emergency ?? false),
+    emergency: emergency,
     ambulance: Boolean(row.ambulance ?? row.has_ambulance ?? false),
-    departments: Array.isArray(row.departments) ? row.departments : [],
+    departments: departments,
     score: Number(row.score ?? row.match_score ?? 75),
-    address: row.address ?? row.full_address ?? '',
-    phone: row.phone ?? row.contact_phone ?? '',
+    address: address,
+    phone: phone,
     rating: Number(row.rating ?? 4.0),
     reviewsCount: Number(row.reviews_count ?? row.reviewsCount ?? 0),
     coordinates: {
-      // Prefer explicit latitude/longitude columns, fallback to generic or combined coordinate objects
       x: Number(
+        row.coord_x ??
         row.latitude ??
         row.lat ??
-        row.coord_x ??
         (row.coordinates && row.coordinates.x) ??
         0
       ),
       y: Number(
+        row.coord_y ??
         row.longitude ??
         row.lng ??
         row.lon ??
-        row.coord_y ??
         (row.coordinates && row.coordinates.y) ??
         0
       ),
@@ -145,46 +183,107 @@ function mapRow(row: Record<string, any>): Hospital {
     insuranceAccepted: Array.isArray(row.insurance_accepted ?? row.insuranceAccepted)
       ? (row.insurance_accepted ?? row.insuranceAccepted)
       : [],
-    doctors: Array.isArray(row.doctors) ? row.doctors : [],
+    doctors: doctors,
   }
 }
 
-// ─── Supabase query ────────────────────────────────────────────────────────────
+// ─── Supabase Queries ─────────────────────────────────────────────────────────
+
+/**
+ * Fetch a single hospital record by its unique database ID from Supabase.
+ * Returns the mapped Hospital object or null if not found.
+ */
+export async function fetchHospitalById(id: string): Promise<Hospital | null> {
+  const trimmedId = id?.trim()
+  if (!trimmedId) return null
+
+  try {
+    const { data, error } = await supabase
+      .from('hospitals')
+      .select('*')
+      .eq('id', trimmedId)
+      .maybeSingle()
+
+    if (error) {
+      console.warn('[hospital-search] fetchHospitalById Supabase error:', error.message)
+      throw new Error(`Database error: ${error.message}`)
+    }
+
+    if (data) {
+      return mapRow(data)
+    }
+
+    // Fallback: check static hospitals for demo IDs (e.g. 'ggh', 'apollo')
+    const staticMatch = STATIC_HOSPITALS.find((h) => h.id === trimmedId)
+    if (staticMatch) {
+      return staticMatch
+    }
+
+    return null
+  } catch (err) {
+    console.warn('[hospital-search] fetchHospitalById error:', err)
+    throw err
+  }
+}
 
 async function fetchFromSupabase(
   districtOrPincode: string,
   isPincodeSearch: boolean
 ): Promise<Hospital[] | null> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let query: any = supabase.from('hospitals').select('id, name, location, district, city, address, latitude, longitude, coord, available_beds, icu_beds, doctors_available, waiting_time, emergency, ambulance, departments, score, phone, rating, reviews_count')
+    const needle = districtOrPincode.trim()
+    if (!needle) return []
+
+    console.log(`[Hospital Search Trace] Fetching from Supabase for "${needle}" (isPincode: ${isPincodeSearch})`)
 
     if (isPincodeSearch) {
-      query = query.or(`pincode.eq.${districtOrPincode},pin_code.eq.${districtOrPincode}`)
-    } else {
-      query = query.or(
-        [
-          `district.ilike.%${districtOrPincode}%`,
-          `location.ilike.%${districtOrPincode}%`,
-          `city.ilike.%${districtOrPincode}%`,
-          `address.ilike.%${districtOrPincode}%`,
-        ].join(',')
-      )
+      const { data, error } = await supabase
+        .from('hospitals')
+        .select('*')
+        .eq('pincode', needle)
+        .limit(200)
+
+      if (error) {
+        console.warn('[Hospital Search Trace] Pincode query failed error:', error.message)
+        return null
+      }
+      console.log(`[Hospital Search Trace] Total records returned from Supabase for pincode "${needle}": ${data?.length ?? 0}`)
+      return (data || []).map(mapRow)
     }
 
-    const { data, error } = await query.limit(50)
+    // 1. Direct district match (server-side, avoids 1000 row truncation)
+    const { data: districtData, error: districtError } = await supabase
+      .from('hospitals')
+      .select('*')
+      .ilike('district', `%${needle}%`)
+      .limit(500)
 
-    if (error) {
-      console.warn('[hospital-search] Supabase query failed:', error.message)
+    if (districtError) {
+      console.warn('[Hospital Search Trace] District query failed error:', districtError.message)
       return null
     }
 
-    if (!data || data.length === 0) return []
+    if (districtData && districtData.length > 0) {
+      console.log(`[Hospital Search Trace] Total records returned from Supabase for district "${needle}": ${districtData.length}`)
+      return districtData.map(mapRow)
+    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (data as Record<string, any>[]).map(mapRow)
+    // 2. Fallback to city, address, location fields
+    const { data: fallbackData, error: fallbackError } = await supabase
+      .from('hospitals')
+      .select('*')
+      .or(`city.ilike.%${needle}%,address.ilike.%${needle}%,location.ilike.%${needle}%`)
+      .limit(500)
+
+    if (fallbackError) {
+      console.warn('[Hospital Search Trace] Fallback query failed error:', fallbackError.message)
+      return null
+    }
+
+    console.log(`[Hospital Search Trace] Total records returned from Supabase fallback for "${needle}": ${fallbackData?.length ?? 0}`)
+    return (fallbackData || []).map(mapRow)
   } catch (err) {
-    console.warn('[hospital-search] Unexpected Supabase error:', err)
+    console.warn('[Hospital Search Trace] Unexpected Supabase error:', err)
     return null
   }
 }
@@ -192,9 +291,34 @@ async function fetchFromSupabase(
 // ─── Filter helpers ────────────────────────────────────────────────────────────
 
 function applyFilters(list: Hospital[], req: PatientRequirement): Hospital[] {
+  const spec = (req.specialty ?? '').trim().toLowerCase()
+  const isAllSpecialties = !spec || spec === 'all' || spec === 'all specialties' || spec === 'other'
+
   return list.filter((h) => {
-    const specialtyMatch =
-      !req.specialty || req.specialty === 'Other' || h.departments.includes(req.specialty)
+    let specialtyMatch = false
+    if (isAllSpecialties) {
+      specialtyMatch = true
+    } else {
+      // 1. Exact or case-insensitive department array match
+      const inDepts = h.departments.some((d) => d.trim().toLowerCase() === spec)
+
+      // 2. Specialty keyword matching on hospital name or facility type
+      const nameAndType = `${h.name} ${h.type}`.toLowerCase()
+      let keywordMatch = false
+      if (spec.includes('cardio')) {
+        keywordMatch = nameAndType.includes('cardio') || nameAndType.includes('heart')
+      } else if (spec.includes('neuro')) {
+        keywordMatch = nameAndType.includes('neuro')
+      } else if (spec.includes('ortho')) {
+        keywordMatch = nameAndType.includes('ortho')
+      } else if (spec.includes('general')) {
+        keywordMatch = nameAndType.includes('general') || nameAndType.includes('medicine') || nameAndType.includes('hospital')
+      } else if (spec.includes('emergency')) {
+        keywordMatch = h.emergency || /emergency|trauma|critical\s*care|medical\s*college|general\s*hospital|super\s*speciality/i.test(nameAndType)
+      }
+      specialtyMatch = inDepts || keywordMatch
+    }
+
     const icuMatch = !req.icuRequired || h.resource.icuBeds > 0
     const emergencyMatch = !req.emergency || h.emergency
     const ambulanceMatch = !req.ambulanceRequired || h.ambulance
@@ -234,8 +358,29 @@ export type HospitalSearchResult = {
 export async function searchHospitals(req: PatientRequirement): Promise<HospitalSearchResult> {
   const rawLocation = (req.location ?? '').trim()
 
-  // ── 1. Empty input → all static hospitals ────────────────────────────────
+  // ── 1. Empty input → fetch top hospitals from Supabase, fallback to static ──
   if (!rawLocation) {
+    try {
+      const { data, error } = await supabase
+        .from('hospitals')
+        .select('*')
+        .limit(100)
+
+      if (!error && data && data.length > 0) {
+        const dbList = data.map(mapRow)
+        const filtered = applyFilters(dbList, req).sort((a, b) => b.score - a.score)
+        return {
+          hospitals: filtered,
+          resolvedLocation: 'Tamil Nadu',
+          fromDatabase: true,
+          noDataForLocation: false,
+          unknownLocation: false,
+        }
+      }
+    } catch (err) {
+      console.warn('[hospital-search] Empty location Supabase fallback:', err)
+    }
+
     const filtered = applyFilters(STATIC_HOSPITALS, req).sort((a, b) => b.score - a.score)
     return {
       hospitals: filtered,
@@ -303,6 +448,12 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
 
     if (dbResults.length > 0) {
       const filtered = applyFilters(dbResults, req).sort((a, b) => b.score - a.score)
+      console.log(
+        `[Hospital Search Trace] District: "${canonical}" | Filter Specialty: "${req.specialty || 'None'}" | Salem/District DB records: ${dbResults.length} | Post-filter matches: ${filtered.length}`
+      )
+      if (req.specialty?.toLowerCase().includes('cardio')) {
+        console.log(`[Hospital Search Trace] Cardiology matches for "${canonical}": ${filtered.length}`)
+      }
       return {
         hospitals: filtered,
         resolvedLocation: canonical,

@@ -3,7 +3,7 @@
 import React, { useState } from 'react'
 import { X, Navigation, LocateFixed, Phone, ArrowRight } from 'lucide-react'
 import { Hospital } from '@/lib/hospital-data'
-import { PatientMap, DEFAULT_PATIENT_LOCATION, HOSPITAL_GEO_COORDINATES } from '@/components/patient-map'
+import { PatientMap, DEFAULT_PATIENT_LOCATION, HOSPITAL_GEO_COORDINATES, DISTRICT_CENTRE_COORDS } from '@/components/patient-map'
 
 interface MapModalProps {
   hospitals: Hospital[]
@@ -15,12 +15,25 @@ interface MapModalProps {
 export function MapModal({ hospitals, onClose, onSelectHospital, onBookHospital }: MapModalProps) {
   const [activeHospital, setActiveHospital] = useState<Hospital>(hospitals[0] || null)
 
-  // Patient location coordinates (stored in variables, ready for API/geolocation replacement)
+  // Derive a location label from the visible hospital list
+  const locationLabel = (() => {
+    if (!hospitals || hospitals.length === 0) return 'Tamil Nadu'
+    const loc = (hospitals[0]?.district || hospitals[0]?.location) ?? ''
+    const parts = loc.split(',')
+    return parts[0]?.trim() || 'Tamil Nadu'
+  })()
+
+  // Center patient / radar location based on the active district
+  const matchedDistrict = Object.keys(DISTRICT_CENTRE_COORDS).find(
+    (d) => d.toLowerCase() === (hospitals[0]?.district || locationLabel).toLowerCase()
+  )
+  const districtCenter = matchedDistrict ? DISTRICT_CENTRE_COORDS[matchedDistrict] : null
+
   const patientLocation = {
-    lat: 13.0067,
-    lng: 80.2575,
-    label: 'Patient Location',
-    description: 'Adyar / Thiruvanmiyur Corridor, Chennai (Current GPS)',
+    lat: districtCenter ? districtCenter.lat : 13.0067,
+    lng: districtCenter ? districtCenter.lng : 80.2575,
+    label: `${matchedDistrict || locationLabel} Corridor`,
+    description: `Active GPS corridor for ${matchedDistrict || locationLabel}`,
   }
 
   const activeGeo = activeHospital
@@ -29,14 +42,6 @@ export function MapModal({ hospitals, onClose, onSelectHospital, onBookHospital 
         lng: patientLocation.lng + (activeHospital.coordinates.x - 50) * 0.003,
       }
     : null
-
-  // Derive a location label from the visible hospital list
-  const locationLabel = (() => {
-    if (!hospitals || hospitals.length === 0) return 'Tamil Nadu'
-    const loc = hospitals[0]?.location ?? ''
-    const parts = loc.split(',')
-    return parts[parts.length - 1]?.trim() || 'Tamil Nadu'
-  })()
 
   return (
     <div

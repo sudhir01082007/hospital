@@ -40,7 +40,7 @@ interface FindHospitalViewProps {
 
 const DEFAULT_REQUIREMENTS: PatientRequirement = {
   location: '',
-  specialty: 'Cardiology',
+  specialty: 'All Specialties',
   icuRequired: false,
   emergency: false,
   ambulanceRequired: false,
@@ -97,18 +97,88 @@ export function FindHospitalView({
   const update = (key: keyof PatientRequirement, value: string | boolean) => {
     const updated = { ...requirements, [key]: value }
     setRequirements(updated)
-    // Auto-run when toggles change (instant feedback)
-    if (typeof value === 'boolean') {
+    // Auto-run when toggles or specialty changes (instant feedback)
+    if (typeof value === 'boolean' || key === 'specialty') {
       runSearch(updated)
     }
   }
 
   // ── Sort the currently displayed list ───────────────────────────────────
   const sortedHospitals = [...displayHospitals].sort((a, b) => {
-    if (sortBy === 'score') return b.score - a.score
-    if (sortBy === 'distance') return a.distance - b.distance
-    if (sortBy === 'wait') return a.resource.waitingTime - b.resource.waitingTime
-    if (sortBy === 'beds') return b.resource.availableBeds - a.resource.availableBeds
+    if (sortBy === 'score') {
+      const scoreA = typeof a.score === 'number' && !isNaN(a.score) && a.score > 0 ? a.score : null
+      const scoreB = typeof b.score === 'number' && !isNaN(b.score) && b.score > 0 ? b.score : null
+      if (scoreA !== null && scoreB !== null) {
+        if (scoreB !== scoreA) return scoreB - scoreA
+        return a.name.localeCompare(b.name)
+      }
+      if (scoreA !== null) return -1
+      if (scoreB !== null) return 1
+      return a.name.localeCompare(b.name)
+    }
+
+    if (sortBy === 'distance') {
+      const distA = typeof a.distance === 'number' && !isNaN(a.distance) && a.distance > 0 ? a.distance : null
+      const distB = typeof b.distance === 'number' && !isNaN(b.distance) && b.distance > 0 ? b.distance : null
+      // Known distances come first, sorted ascending (nearest first)
+      if (distA !== null && distB !== null) {
+        if (distA !== distB) return distA - distB
+        return b.score - a.score
+      }
+      if (distA !== null) return -1
+      if (distB !== null) return 1
+      // Both unknown: place after known, tie-break by AI match score then name
+      return (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name)
+    }
+
+    if (sortBy === 'wait') {
+      const waitA =
+        typeof a.resource?.waitingTime === 'number' &&
+        !isNaN(a.resource.waitingTime) &&
+        a.resource.waitingTime > 0
+          ? a.resource.waitingTime
+          : null
+      const waitB =
+        typeof b.resource?.waitingTime === 'number' &&
+        !isNaN(b.resource.waitingTime) &&
+        b.resource.waitingTime > 0
+          ? b.resource.waitingTime
+          : null
+      // Known wait times come first, sorted ascending (lowest first)
+      if (waitA !== null && waitB !== null) {
+        if (waitA !== waitB) return waitA - waitB
+        return b.score - a.score
+      }
+      if (waitA !== null) return -1
+      if (waitB !== null) return 1
+      // Both unknown: place after known, tie-break by AI match score
+      return (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name)
+    }
+
+    if (sortBy === 'beds') {
+      const bedsA =
+        typeof a.resource?.availableBeds === 'number' && !isNaN(a.resource.availableBeds)
+          ? a.resource.availableBeds
+          : null
+      const bedsB =
+        typeof b.resource?.availableBeds === 'number' && !isNaN(b.resource.availableBeds)
+          ? b.resource.availableBeds
+          : null
+      // Known bed counts come first, sorted descending (highest first)
+      if (bedsA !== null && bedsB !== null) {
+        if (bedsB !== bedsA) return bedsB - bedsA
+        // Secondary sort by ICU beds
+        const icuA = a.resource?.icuBeds ?? 0
+        const icuB = b.resource?.icuBeds ?? 0
+        if (icuB !== icuA) return icuB - icuA
+        return b.score - a.score
+      }
+      if (bedsA !== null) return -1
+      if (bedsB !== null) return 1
+      // Both unknown: place after known, tie-break by AI match score
+      return (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name)
+    }
+
     return 0
   })
 
@@ -116,8 +186,13 @@ export function FindHospitalView({
 
   // ── Reset ────────────────────────────────────────────────────────────────
   const handleReset = () => {
-    setRequirements(DEFAULT_REQUIREMENTS)
-    runSearch(DEFAULT_REQUIREMENTS)
+    // Preserve the currently selected district (location) while resetting other filters
+    const updated = {
+      ...DEFAULT_REQUIREMENTS,
+      location: requirements.location,
+    };
+    setRequirements(updated);
+    runSearch(updated);
   }
 
   return (
@@ -257,11 +332,12 @@ export function FindHospitalView({
 
           <div className="flex items-center gap-2 text-xs">
             <SlidersHorizontal className="size-3.5 text-muted-foreground" />
-            <span className="text-muted-foreground">Sort By:</span>
+            <span className="text-muted-foreground font-medium">Sort By:</span>
             <select
+              id="hospital-sort-select"
               value={sortBy}
               onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-              className="rounded-lg border border-input bg-background px-2.5 py-1 font-semibold text-foreground outline-none"
+              className="rounded-lg border border-input bg-background px-2.5 py-1 font-semibold text-foreground outline-none cursor-pointer focus:ring-2 focus:ring-ring"
             >
               <option value="score">Best AI Match %</option>
               <option value="distance">Shortest Distance</option>
@@ -328,6 +404,36 @@ export function FindHospitalView({
             </div>
           )}
 
+          {/* Active sort limitation & explanation note */}
+          {!isPending && sortedHospitals.length > 0 && (
+            <>
+              {sortBy === 'distance' && sortedHospitals.some((h) => !h.distance || h.distance <= 0) && (
+                <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800">
+                  <Info className="size-3.5 shrink-0 text-amber-600" />
+                  <span>
+                    Sorted by distance. Verified GPS coordinates are listed first; facilities with pending location telemetry appear below.
+                  </span>
+                </div>
+              )}
+              {sortBy === 'wait' && (
+                <div className="flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-800">
+                  <Info className="size-3.5 shrink-0 text-blue-600" />
+                  <span>
+                    Sorted by emergency &amp; triage wait times (lowest first). Facilities with verified real-time queues appear first.
+                  </span>
+                </div>
+              )}
+              {sortBy === 'beds' && (
+                <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
+                  <Info className="size-3.5 shrink-0 text-emerald-600" />
+                  <span>
+                    Sorted by available bed capacity (highest first). Facilities with verified real-time census appear first.
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+
           <div className="flex flex-col gap-4">
             {isPending ? (
               // Loading skeleton
@@ -370,8 +476,10 @@ export function FindHospitalView({
                           <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
                             <MapPin className="size-3.5 shrink-0" />
                             {hospital.location}
-                            {hospital.distance > 0 && (
+                            {hospital.distance > 0 ? (
                               <> · <strong className="text-foreground">{hospital.distance} km</strong> away</>
+                            ) : (
+                              <span className="text-muted-foreground/60 italic text-[11px]"> · Distance pending GPS</span>
                             )}
                           </p>
                         </div>
@@ -494,18 +602,41 @@ export function FindHospitalView({
                 ) : (
                   <>
                     <Search className="mx-auto size-8 text-muted-foreground" />
-                    <h4 className="mt-3 font-bold text-foreground">No Hospitals Match Current Filters</h4>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Try relaxing your ICU, specialty, or emergency criteria.
-                    </p>
+                    <h4 className="mt-3 font-bold text-foreground">
+                      {sortedHospitals.length} Healthcare {sortedHospitals.length === 1 ? 'Facility' : 'Facilities'} Matched
+                      {searchMeta.resolvedLocation ? ` — ${searchMeta.resolvedLocation}` : ''}
+                    </h4>
+                    {requirements.specialty && requirements.specialty !== 'All Specialties' ? (
+                      <p className="mt-1 text-xs text-muted-foreground max-w-md mx-auto">
+                        No facilities in <strong>{searchMeta.resolvedLocation || 'this district'}</strong> currently match the &ldquo;{requirements.specialty}&rdquo; specialty filter in the state hospital database.
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Try relaxing your ICU, specialty, or emergency criteria.
+                      </p>
+                    )}
+                    <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+                      {requirements.specialty && requirements.specialty !== 'All Specialties' && (
+                        <button
+                          onClick={() => {
+                            const updated = { ...requirements, specialty: 'All Specialties' }
+                            setRequirements(updated)
+                            runSearch(updated)
+                          }}
+                          className="rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:bg-primary/90 transition shadow-xs cursor-pointer"
+                        >
+                          View All {searchMeta.resolvedLocation || 'District'} Facilities
+                        </button>
+                      )}
+                      <button
+                        onClick={handleReset}
+                        className="rounded-xl border border-border bg-card px-4 py-2 text-xs font-semibold text-foreground hover:bg-muted transition cursor-pointer"
+                      >
+                        Reset All Filters
+                      </button>
+                    </div>
                   </>
                 )}
-                <button
-                  onClick={handleReset}
-                  className="mt-4 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground"
-                >
-                  Reset
-                </button>
               </div>
             ) : (
               // Initial state before first search

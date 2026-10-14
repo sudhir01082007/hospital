@@ -426,6 +426,16 @@ export function LoginView({ onLogin }: LoginViewProps) {
                       )}
                     </button>
 
+                    {/* Quick Demo Access Button */}
+                    <button
+                      type="button"
+                      id="demo-login-btn"
+                      onClick={() => onLogin('ananya.krishnan@gmail.com')}
+                      className="mt-2 flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-dashed border-primary/40 bg-primary/5 text-xs font-bold text-primary hover:bg-primary/10 transition cursor-pointer"
+                    >
+                      <Sparkles className="size-3.5" /> Quick Demo Sign-in (Verified Patient)
+                    </button>
+
                     {/* Switch to register */}
                     <p className="text-center text-xs text-muted-foreground pt-1">
                       Don&apos;t have an account?{' '}

@@ -20,6 +20,9 @@ export type Hospital = {
   location: string
   distance: number
   type: string
+  district?: string
+  city?: string
+  pincode?: string
   resource: HospitalResource
   emergency: boolean
   ambulance: boolean
@@ -273,6 +276,7 @@ export const hospitals: Hospital[] = [
 ]
 
 export const specialties = [
+  'All Specialties',
   'Cardiology',
   'Neurology',
   'Orthopedics',
@@ -290,6 +294,7 @@ export function rankHospitals(requirement: PatientRequirement) {
         hospital.address.toLowerCase().includes(requirement.location.toLowerCase())
       const specialtyMatch =
         requirement.specialty === 'Other' ||
+        requirement.specialty === 'All Specialties' ||
         !requirement.specialty ||
         hospital.departments.includes(requirement.specialty)
       const emergencyMatch = !requirement.emergency || hospital.emergency

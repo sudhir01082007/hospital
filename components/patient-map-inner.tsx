@@ -77,7 +77,20 @@ export default function PatientMapInner({
   onSelectHospital,
   onBookHospital,
 }: PatientMapInnerProps) {
-  const centerPosition: [number, number] = [patientLocation.lat, patientLocation.lng]
+  // Derive center position: if hospitals are provided and their district has known coords,
+  // ensure map focuses on the search district if patientLocation is default Chennai
+  const firstDistrict = hospitals[0]?.district || hospitals[0]?.location?.split(',')[0]?.trim() || ''
+  const matchedDistrict = Object.keys(DISTRICT_CENTRE_COORDS).find(
+    (d) => d.toLowerCase() === firstDistrict.toLowerCase()
+  )
+  const districtCenter = matchedDistrict ? DISTRICT_CENTRE_COORDS[matchedDistrict] : null
+  const isDefaultChennai = Math.abs(patientLocation.lat - 13.0067) < 0.01 && Math.abs(patientLocation.lng - 80.2575) < 0.01
+
+  const centerPosition: [number, number] =
+    districtCenter && isDefaultChennai
+      ? [districtCenter.lat, districtCenter.lng]
+      : [patientLocation.lat, patientLocation.lng]
+
   const patientIcon = createPatientIcon()
 
   return (
@@ -128,26 +141,49 @@ export default function PatientMapInner({
         {/* Surrounding Hospital Markers */}
         {showHospitals &&
           hospitals.map((hospital) => {
+            // Determine geographic position
             const geo = HOSPITAL_GEO_COORDINATES[hospital.id] || (() => {
-              // Try to find district centre from hospital.location (e.g. "RS Puram, Coimbatore")
-              const locParts = (hospital.location ?? '').split(',')
-              const districtGuess = locParts[locParts.length - 1]?.trim()
-              if (districtGuess && DISTRICT_CENTRE_COORDS[districtGuess]) {
-                // Add small jitter so multiple hospitals don't overlap exactly
-                const jitter = (Math.random() - 0.5) * 0.02
-                return {
-                  lat: DISTRICT_CENTRE_COORDS[districtGuess].lat + jitter,
-                  lng: DISTRICT_CENTRE_COORDS[districtGuess].lng + jitter,
+              // Use explicit latitude/longitude if present (from Supabase)
+              if (hospital.coordinates && hospital.coordinates.x && hospital.coordinates.y) {
+                return { lat: hospital.coordinates.x, lng: hospital.coordinates.y };
+              }
+              // Try district centre fallback
+              const locParts = (hospital.location ?? '').split(',');
+              const candidateDistrict =
+                hospital.district ||
+                locParts[0]?.trim() ||
+                locParts[locParts.length - 1]?.trim() ||
+                '';
+
+              const matched =
+                Object.keys(DISTRICT_CENTRE_COORDS).find(
+                  (d) =>
+                    d.toLowerCase() === candidateDistrict.toLowerCase() ||
+                    (hospital.location && hospital.location.toLowerCase().includes(d.toLowerCase())) ||
+                    (hospital.address && hospital.address.toLowerCase().includes(d.toLowerCase()))
+                );
+
+              if (matched && DISTRICT_CENTRE_COORDS[matched]) {
+                let hash = 0;
+                const idStr = hospital.id || hospital.name;
+                for (let i = 0; i < idStr.length; i++) {
+                  hash = (hash << 5) - hash + idStr.charCodeAt(i);
+                  hash |= 0;
                 }
+                const jitterLat = (((Math.abs(hash) % 1000) / 1000) - 0.5) * 0.05;
+                const jitterLng = (((Math.abs(hash >> 3) % 1000) / 1000) - 0.5) * 0.05;
+                return {
+                  lat: DISTRICT_CENTRE_COORDS[matched].lat + jitterLat,
+                  lng: DISTRICT_CENTRE_COORDS[matched].lng + jitterLng,
+                };
               }
-              // Last resort: offset from patient position (existing behaviour)
-              return {
-                lat: patientLocation.lat + (hospital.coordinates.y - 50) * 0.003,
-                lng: patientLocation.lng + (hospital.coordinates.x - 50) * 0.003,
-              }
-            })()
-            const hospitalPosition: [number, number] = [geo.lat, geo.lng]
-            const icon = createHospitalIcon(hospital.resource.availableBeds, hospital.emergency)
+              // No usable coordinates – skip marker
+              return null;
+            })();
+            // Skip rendering if we couldn't resolve a position
+            if (!geo) return null;
+            const hospitalPosition: [number, number] = [geo.lat, geo.lng];
+            const icon = createHospitalIcon(hospital.resource.availableBeds, hospital.emergency);
 
             return (
               <Marker

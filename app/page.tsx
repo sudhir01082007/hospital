@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
-import { searchHospitals, searchHospitalsSync } from '@/lib/hospital-search'
+import { searchHospitals, searchHospitalsSync, fetchHospitalById } from '@/lib/hospital-search'
 import { MyLocationSection } from '@/components/sections/my-location-section'
 import {
   LayoutDashboard,
@@ -34,6 +34,7 @@ import {
   Calendar,
   Navigation,
   User,
+  Loader2,
 } from 'lucide-react'
 import {
   hospitals as initialHospitals,
@@ -64,6 +65,7 @@ import { SupportModal } from '@/components/modals/support-modal'
 import { LoginView } from '@/components/auth/login-view'
 import {
   setActiveUserEmail,
+  getActiveUserEmail,
   getUserPartition,
   saveUserPartition,
   getInitials,
@@ -115,6 +117,10 @@ export default function Page() {
 
   // Dialog & Modal States
   const [detailsHospital, setDetailsHospital] = useState<Hospital | null>(null)
+  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState<boolean>(false)
+  const [isLoadingDetails, setIsLoadingDetails] = useState<boolean>(false)
+  const [detailsError, setDetailsError] = useState<string | null>(null)
+  const [selectedHospitalId, setSelectedHospitalId] = useState<string>('')
   const [bookingHospital, setBookingHospital] = useState<Hospital | null>(null)
   const [isBookingModalOpen, setIsBookingModalOpen] = useState<boolean>(false)
   const [isMapModalOpen, setIsMapModalOpen] = useState<boolean>(false)
@@ -153,6 +159,11 @@ export default function Page() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user?.email) {
         loadUserSession(session.user.email, false)
+      } else {
+        const stored = getActiveUserEmail()
+        if (stored) {
+          loadUserSession(stored, false)
+        }
       }
       if (session?.user?.id) {
         setCurrentUserId(session.user.id)
@@ -168,6 +179,16 @@ export default function Page() {
       } else if (session.user?.id) {
         setCurrentUserId(session.user.id)
       }
+    })
+
+    // Fetch initial hospital records from Supabase
+    handleFilterHospitals({
+      location: '',
+      specialty: '',
+      icuRequired: false,
+      emergency: false,
+      ambulanceRequired: false,
+      notes: '',
     })
 
     return () => subscription.unsubscribe()
@@ -217,6 +238,47 @@ export default function Page() {
     } catch {
       // Fallback to synchronous static search on unexpected error
       setHospitals(searchHospitalsSync(req))
+    }
+  }
+
+  // Hospital Details Selection Handler - Fetches by unique database ID
+  const handleViewDetails = async (hospitalOrId: Hospital | string) => {
+    const id = typeof hospitalOrId === 'string' ? hospitalOrId : hospitalOrId?.id
+    if (!id) return
+
+    console.log('[Hospital Selection Trace] 1. Selected ID:', id, 'Source:', typeof hospitalOrId === 'object' ? hospitalOrId.name : 'ID string')
+    setSelectedHospitalId(id)
+    setIsDetailsModalOpen(true)
+    setIsLoadingDetails(true)
+    setDetailsError(null)
+
+    // Pre-populate known object data if available for immediate user feedback
+    if (typeof hospitalOrId === 'object' && hospitalOrId.id) {
+      setDetailsHospital(hospitalOrId)
+    } else {
+      setDetailsHospital(null)
+    }
+
+    try {
+      console.log('[Hospital Selection Trace] 2. Querying Supabase fetchHospitalById with ID:', id)
+      const fresh = await fetchHospitalById(id)
+      console.log('[Hospital Selection Trace] 3. Supabase returned record:', fresh ? { id: fresh.id, name: fresh.name, district: fresh.district, availableBeds: fresh.resource?.availableBeds, icuBeds: fresh.resource?.icuBeds } : null)
+      if (fresh) {
+        setDetailsHospital(fresh)
+        setDetailsError(null)
+      } else {
+        setDetailsHospital(null)
+        setDetailsError(`No hospital record found in the database for ID "${id}".`)
+      }
+    } catch (err: any) {
+      console.error('[Hospital Selection Trace] Error querying hospital:', err)
+      if (typeof hospitalOrId !== 'object') {
+        setDetailsHospital(null)
+      }
+      setDetailsError(`Failed to retrieve hospital from database: ${err?.message || 'Network error'}`)
+    } finally {
+      setIsLoadingDetails(false)
+      console.log('[Hospital Selection Trace] 4. Query finished. Loading: false.')
     }
   }
 
@@ -546,7 +608,7 @@ export default function Page() {
                 savedHospitalIds={savedHospitalIds}
                 onToggleSave={toggleSaveHospital}
                 onNavigateTab={setActiveTab}
-                onViewDetails={setDetailsHospital}
+                onViewDetails={handleViewDetails}
                 onBookAppointment={(h) => {
                   setBookingHospital(h)
                   setIsBookingModalOpen(true)
@@ -568,7 +630,7 @@ export default function Page() {
                 hospitals={hospitals}
                 savedHospitalIds={savedHospitalIds}
                 onToggleSave={toggleSaveHospital}
-                onViewDetails={setDetailsHospital}
+                onViewDetails={handleViewDetails}
                 onBookHospital={(h) => {
                   setBookingHospital(h)
                   setIsBookingModalOpen(true)
@@ -584,7 +646,7 @@ export default function Page() {
                 hospitals={hospitals}
                 savedHospitalIds={savedHospitalIds}
                 onToggleSave={toggleSaveHospital}
-                onViewDetails={setDetailsHospital}
+                onViewDetails={handleViewDetails}
                 onBookHospital={(h) => {
                   setBookingHospital(h)
                   setIsBookingModalOpen(true)
@@ -596,7 +658,7 @@ export default function Page() {
               <EmergencyView
                 hospitals={hospitals}
                 userProfile={userProfile}
-                onViewDetails={setDetailsHospital}
+                onViewDetails={handleViewDetails}
               />
             )}
 
@@ -605,7 +667,7 @@ export default function Page() {
                 hospitals={hospitals}
                 savedHospitalIds={savedHospitalIds}
                 onToggleSave={toggleSaveHospital}
-                onViewDetails={setDetailsHospital}
+                onViewDetails={handleViewDetails}
                 onBookHospital={(h) => {
                   setBookingHospital(h)
                   setIsBookingModalOpen(true)
@@ -670,147 +732,235 @@ export default function Page() {
       </div>
 
       {/* Hospital Details Dialog Modal */}
-      {detailsHospital && (
+      {isDetailsModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 p-4 backdrop-blur-xs"
           role="presentation"
-          onClick={() => setDetailsHospital(null)}
+          onClick={() => {
+            setIsDetailsModalOpen(false)
+            setDetailsHospital(null)
+            setDetailsError(null)
+            setSelectedHospitalId('')
+          }}
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="hospital-dialog-title"
-            className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-3xl border border-border bg-card p-6 sm:p-7 shadow-2xl"
+            className="max-h-[90vh] w-full max-w-xl overflow-y-auto rounded-3xl border border-border bg-card p-6 sm:p-7 shadow-2xl relative"
             onClick={(e) => e.stopPropagation()}
           >
+            {/* Modal Header */}
             <div className="flex items-start justify-between border-b border-border pb-4">
               <div>
-                <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-bold text-primary">
-                  {detailsHospital.type}
-                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-bold text-primary">
+                    {detailsHospital?.type || 'Healthcare Facility'}
+                  </span>
+                  {detailsHospital?.district && (
+                    <span className="rounded-full bg-muted px-2.5 py-0.5 text-xs font-bold text-muted-foreground">
+                      {detailsHospital.district}
+                    </span>
+                  )}
+                  {selectedHospitalId && (
+                    <span className="rounded-full bg-muted/60 px-2 py-0.5 text-[10px] font-mono text-muted-foreground">
+                      ID: {selectedHospitalId}
+                    </span>
+                  )}
+                </div>
                 <h2 id="hospital-dialog-title" className="mt-2 text-xl font-bold text-foreground">
-                  {detailsHospital.name}
+                  {detailsHospital?.name || (isLoadingDetails ? 'Loading Hospital Details...' : 'Facility Details')}
                 </h2>
-                <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
-                  <MapPin className="size-3.5 text-primary" /> {detailsHospital.address}
-                </p>
+                {detailsHospital?.address && (
+                  <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                    <MapPin className="size-3.5 text-primary" /> {detailsHospital.address}
+                  </p>
+                )}
               </div>
               <button
-                onClick={() => setDetailsHospital(null)}
+                onClick={() => {
+                  setIsDetailsModalOpen(false)
+                  setDetailsHospital(null)
+                  setDetailsError(null)
+                  setSelectedHospitalId('')
+                }}
                 aria-label="Close details"
-                className="rounded-xl p-2 text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="rounded-xl p-2 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
               >
                 <X className="size-5" />
               </button>
             </div>
 
-            {/* Live Metrics */}
-            <div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-              <div className="rounded-xl bg-muted/50 p-3">
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground">Total Beds</span>
-                <p className="text-base font-bold text-foreground mt-0.5">
-                  {detailsHospital.resource.availableBeds} units
+            {/* Loading Indicator */}
+            {isLoadingDetails && (
+              <div className="flex flex-col items-center justify-center py-10 text-center">
+                <Loader2 className="size-8 animate-spin text-primary" />
+                <p className="mt-3 text-sm font-semibold text-foreground">
+                  Fetching hospital details from Supabase database...
                 </p>
+                <p className="mt-1 text-xs text-muted-foreground font-mono">ID: {selectedHospitalId}</p>
               </div>
-              <div className="rounded-xl bg-muted/50 p-3">
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground">ICU Beds</span>
-                <p className="text-base font-bold text-foreground mt-0.5">
-                  {detailsHospital.resource.icuBeds} Ready
-                </p>
-              </div>
-              <div className="rounded-xl bg-muted/50 p-3">
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground">Ventilators</span>
-                <p className="text-base font-bold text-foreground mt-0.5">
-                  {detailsHospital.resource.ventilatorBeds} Units
-                </p>
-              </div>
-              <div className="rounded-xl bg-muted/50 p-3">
-                <span className="text-[10px] uppercase font-semibold text-muted-foreground">Wait Time</span>
-                <p className="text-base font-bold text-foreground mt-0.5">
-                  {detailsHospital.resource.waitingTime} mins
-                </p>
-              </div>
-            </div>
+            )}
 
-            {/* Departments */}
-            <div className="mt-5">
-              <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                Clinical Departments & Centers of Excellence
-              </p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {detailsHospital.departments.map((dept) => (
-                  <span
-                    key={dept}
-                    className="rounded-lg bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary"
+            {/* Error or Not Found State */}
+            {!isLoadingDetails && detailsError && !detailsHospital && (
+              <div className="py-8 text-center">
+                <div className="mx-auto flex size-12 items-center justify-center rounded-2xl bg-destructive/10 text-destructive">
+                  <AlertCircle className="size-6" />
+                </div>
+                <h3 className="mt-3 text-base font-bold text-foreground">Hospital Record Unavailable</h3>
+                <p className="mt-1.5 text-xs text-muted-foreground max-w-md mx-auto">{detailsError}</p>
+                <div className="mt-5 flex justify-center gap-3">
+                  <button
+                    onClick={() => handleViewDetails(selectedHospitalId)}
+                    className="rounded-xl bg-primary px-4 py-2 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition cursor-pointer"
                   >
-                    {dept}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            {/* Available Doctors List */}
-            {detailsHospital.doctors && detailsHospital.doctors.length > 0 && (
-              <div className="mt-5 border-t border-border pt-4">
-                <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                  Consulting Specialists
-                </p>
-                <div className="mt-2 divide-y divide-border">
-                  {detailsHospital.doctors.map((doc) => (
-                    <div key={doc.name} className="flex items-center justify-between py-2 text-xs">
-                      <div>
-                        <p className="font-bold text-foreground">{doc.name}</p>
-                        <p className="text-muted-foreground text-[11px]">{doc.role} · {doc.experience}</p>
-                      </div>
-                      <span className="font-semibold text-primary">{doc.fee}</span>
-                    </div>
-                  ))}
+                    Retry Query
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsDetailsModalOpen(false)
+                      setDetailsError(null)
+                    }}
+                    className="rounded-xl border border-border px-4 py-2 text-xs font-semibold text-foreground hover:bg-muted transition cursor-pointer"
+                  >
+                    Close
+                  </button>
                 </div>
               </div>
             )}
 
-            {/* Phone & Contact */}
-            <div className="mt-5 flex items-center justify-between rounded-2xl bg-primary/5 p-4">
-              <div className="flex items-center gap-3">
-                <Phone className="size-4 text-primary" />
-                <div>
-                  <p className="text-xs font-bold text-foreground">{detailsHospital.phone}</p>
-                  <p className="text-[10px] text-muted-foreground">24/7 Emergency & Admission Desk</p>
+            {/* Loaded Details Body */}
+            {detailsHospital && (
+              <>
+                {/* Live Metrics */}
+                <div className="mt-5 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                  <div className="rounded-xl bg-muted/50 p-3">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground">Total Beds</span>
+                    <p className="text-base font-bold text-foreground mt-0.5">
+                      {detailsHospital.resource.availableBeds} units
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-muted/50 p-3">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground">ICU Beds</span>
+                    <p className="text-base font-bold text-foreground mt-0.5">
+                      {detailsHospital.resource.icuBeds} Ready
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-muted/50 p-3">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground">Ventilators</span>
+                    <p className="text-base font-bold text-foreground mt-0.5">
+                      {detailsHospital.resource.ventilatorBeds} Units
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-muted/50 p-3">
+                    <span className="text-[10px] uppercase font-semibold text-muted-foreground">Wait Time</span>
+                    <p className="text-base font-bold text-foreground mt-0.5">
+                      {detailsHospital.resource.waitingTime} mins
+                    </p>
+                  </div>
                 </div>
-              </div>
-              <a
-                href={`tel:${detailsHospital.phone}`}
-                className="rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90"
-              >
-                Call Now
-              </a>
-            </div>
 
-            {/* Actions */}
-            <div className="mt-6 flex gap-3 pt-2 border-t border-border">
-              <button
-                onClick={() => toggleSaveHospital(detailsHospital.id)}
-                className="flex items-center gap-1.5 rounded-xl border border-border px-4 py-2.5 text-xs font-semibold text-foreground hover:bg-muted transition"
-              >
-                <Heart
-                  className={`size-4 ${
-                    savedHospitalIds.includes(detailsHospital.id) ? 'fill-rose-600 text-rose-600' : ''
-                  }`}
-                />
-                {savedHospitalIds.includes(detailsHospital.id) ? 'Saved' : 'Save'}
-              </button>
-              <button
-                onClick={() => {
-                  const target = detailsHospital
-                  setDetailsHospital(null)
-                  setBookingHospital(target)
-                  setIsBookingModalOpen(true)
-                }}
-                className="flex-1 rounded-xl bg-primary py-2.5 text-xs font-bold text-primary-foreground shadow-sm hover:bg-primary/90 transition"
-              >
-                Book Priority Appointment Here
-              </button>
-            </div>
+                {/* Departments */}
+                <div className="mt-5">
+                  <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Clinical Departments & Centers of Excellence
+                  </p>
+                  {detailsHospital.departments && detailsHospital.departments.length > 0 ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {detailsHospital.departments.map((dept) => (
+                        <span
+                          key={dept}
+                          className="rounded-lg bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary"
+                        >
+                          {dept}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-2 rounded-xl bg-muted/40 p-2.5 text-xs italic text-muted-foreground">
+                      General Medical & Outpatient Services (Department breakdown currently being updated by hospital administration).
+                    </p>
+                  )}
+                </div>
+
+                {/* Available Doctors List */}
+                <div className="mt-5 border-t border-border pt-4">
+                  <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                    Consulting Specialists & Duty Doctors
+                  </p>
+                  {detailsHospital.doctors && detailsHospital.doctors.length > 0 ? (
+                    <div className="mt-2 divide-y divide-border">
+                      {detailsHospital.doctors.map((doc) => (
+                        <div key={doc.name} className="flex items-center justify-between py-2 text-xs">
+                          <div>
+                            <p className="font-bold text-foreground">{doc.name}</p>
+                            <p className="text-muted-foreground text-[11px]">
+                              {doc.role} · {doc.experience}
+                            </p>
+                          </div>
+                          <span className="font-semibold text-primary">{doc.fee}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-2 rounded-xl bg-muted/40 p-2.5 text-xs italic text-muted-foreground">
+                      Doctor duty roster is synchronized in real-time. Please contact the admission desk for current on-call specialists.
+                    </p>
+                  )}
+                </div>
+
+                {/* Phone & Contact */}
+                <div className="mt-5 flex items-center justify-between rounded-2xl bg-primary/5 p-4">
+                  <div className="flex items-center gap-3">
+                    <Phone className="size-4 text-primary" />
+                    <div>
+                      <p className="text-xs font-bold text-foreground">
+                        {detailsHospital.phone || 'Phone number not listed on record'}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">24/7 Emergency & Admission Desk</p>
+                    </div>
+                  </div>
+                  {detailsHospital.phone ? (
+                    <a
+                      href={`tel:${detailsHospital.phone}`}
+                      className="rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:bg-primary/90 transition"
+                    >
+                      Call Now
+                    </a>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground">Direct dial unavailable</span>
+                  )}
+                </div>
+
+                {/* Actions */}
+                <div className="mt-6 flex gap-3 pt-2 border-t border-border">
+                  <button
+                    onClick={() => toggleSaveHospital(detailsHospital.id)}
+                    className="flex items-center gap-1.5 rounded-xl border border-border px-4 py-2.5 text-xs font-semibold text-foreground hover:bg-muted transition cursor-pointer"
+                  >
+                    <Heart
+                      className={`size-4 ${
+                        savedHospitalIds.includes(detailsHospital.id) ? 'fill-rose-600 text-rose-600' : ''
+                      }`}
+                    />
+                    {savedHospitalIds.includes(detailsHospital.id) ? 'Saved' : 'Save'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      const target = detailsHospital
+                      setIsDetailsModalOpen(false)
+                      setDetailsHospital(null)
+                      setBookingHospital(target)
+                      setIsBookingModalOpen(true)
+                    }}
+                    className="flex-1 rounded-xl bg-primary py-2.5 text-xs font-bold text-primary-foreground shadow-sm hover:bg-primary/90 transition cursor-pointer"
+                  >
+                    Book Priority Appointment Here
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -833,7 +983,7 @@ export default function Page() {
         <MapModal
           hospitals={hospitals}
           onClose={() => setIsMapModalOpen(false)}
-          onSelectHospital={(h) => setDetailsHospital(h)}
+          onSelectHospital={(h) => handleViewDetails(h)}
           onBookHospital={(h) => {
             setBookingHospital(h)
             setIsBookingModalOpen(true)
