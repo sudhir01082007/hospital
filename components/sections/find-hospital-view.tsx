@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useTransition, useCallback } from 'react'
+import { useState, useTransition, useCallback, useMemo } from 'react'
 import {
   Search,
   Sparkles,
@@ -21,11 +21,14 @@ import {
   Cross,
   Loader2,
   AlertTriangle,
+  AlertCircle,
   Info,
+  X,
 } from 'lucide-react'
 import { Hospital, PatientRequirement, specialties, recentSearches, defaultReasons } from '@/lib/hospital-data'
 import { DISTRICTS } from '@/lib/hospital-search'
 import { searchHospitals, type HospitalSearchResult } from '@/lib/hospital-search'
+import { interpretSymptoms, type SymptomInterpretation } from '@/lib/symptom-interpreter'
 
 interface FindHospitalViewProps {
   hospitals: Hospital[]
@@ -61,12 +64,19 @@ export function FindHospitalView({
   const [sortBy, setSortBy] = useState<'score' | 'distance' | 'wait' | 'beds'>('score')
   const [isPending, startTransition] = useTransition()
 
+  // Live emergency symptom detection for instant patient warning (before search is triggered)
+  const liveInterpretation = useMemo(
+    () => interpretSymptoms(requirements.notes),
+    [requirements.notes]
+  )
+
   // Search result metadata (from the async search)
   const [searchMeta, setSearchMeta] = useState<Omit<HospitalSearchResult, 'hospitals'>>({
     resolvedLocation: '',
     fromDatabase: false,
     noDataForLocation: false,
     unknownLocation: false,
+    symptomInterpretation: undefined,
   })
 
   // Local display list (updated after each search)
@@ -84,6 +94,7 @@ export function FindHospitalView({
           fromDatabase: result.fromDatabase,
           noDataForLocation: result.noDataForLocation,
           unknownLocation: result.unknownLocation,
+          symptomInterpretation: result.symptomInterpretation,
         })
         setHasSearched(true)
         // Sync parent state so map, dashboard, etc. also update
@@ -266,14 +277,45 @@ export function FindHospitalView({
           </label>
 
           <label className="flex flex-col gap-1.5 text-xs font-semibold text-foreground">
-            Symptoms or Specific Notes
-            <input
-              id="hospital-notes-input"
-              value={requirements.notes}
-              onChange={(e) => update('notes', e.target.value)}
-              className="h-10 w-full rounded-xl border border-input bg-background px-3 text-sm font-normal text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring"
-              placeholder="e.g. Chest pain, breathlessness, fever"
-            />
+            <span className="flex items-center justify-between">
+              <span>Symptoms or Specific Notes</span>
+              {liveInterpretation.inferredSpecialty && !liveInterpretation.isEmergency && (
+                <span className="font-normal text-[11px] text-primary truncate max-w-[140px]">
+                  Suggested: {liveInterpretation.inferredSpecialty}
+                </span>
+              )}
+            </span>
+            <div className="relative">
+              <input
+                id="hospital-notes-input"
+                value={requirements.notes}
+                onChange={(e) => update('notes', e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    runSearch(requirements)
+                  }
+                }}
+                className="h-10 w-full rounded-xl border border-input bg-background pl-3 pr-8 text-sm font-normal text-foreground outline-none placeholder:text-muted-foreground focus:ring-2 focus:ring-ring"
+                placeholder="e.g. Knee pain, fever for 3 days, chest pain..."
+              />
+              {requirements.notes.length > 0 && (
+                <button
+                  type="button"
+                  id="hospital-notes-clear-btn"
+                  onClick={() => {
+                    const updated = { ...requirements, notes: '' }
+                    setRequirements(updated)
+                    runSearch(updated)
+                  }}
+                  className="absolute right-2.5 top-2.5 flex size-5 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground transition cursor-pointer"
+                  title="Clear notes"
+                  aria-label="Clear notes"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </div>
           </label>
 
           <div className="flex items-end">
@@ -281,7 +323,7 @@ export function FindHospitalView({
               id="hospital-search-button"
               onClick={() => runSearch(requirements)}
               disabled={isPending}
-              className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground shadow-sm hover:bg-primary/90 transition disabled:opacity-60"
+              className="flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-bold text-primary-foreground shadow-sm hover:bg-primary/90 transition disabled:opacity-60 cursor-pointer"
             >
               {isPending ? (
                 <Loader2 className="size-4 animate-spin" />
@@ -292,6 +334,59 @@ export function FindHospitalView({
             </button>
           </div>
         </div>
+
+        {/* Live Immediate Emergency Warning Banner (Shown as patient types without waiting for search) */}
+        {liveInterpretation.isEmergency && (
+          <div
+            id="live-emergency-alert"
+            className="mt-4 rounded-2xl border-2 border-red-500 bg-red-50 p-4 text-red-950 shadow-sm"
+          >
+            <div className="flex items-start gap-3">
+              <AlertCircle className="size-5 text-red-600 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="font-bold text-sm text-red-900 flex items-center gap-1.5">
+                    <Siren className="size-4 text-red-600" />
+                    URGENT MEDICAL WARNING: Potential Critical Emergency
+                  </h4>
+                  <div className="flex items-center gap-2">
+                    <a
+                      href="tel:108"
+                      id="emergency-call-108-btn"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-red-700 transition"
+                    >
+                      <Phone className="size-3.5" /> Call 108 (Ambulance)
+                    </a>
+                    <button
+                      type="button"
+                      id="emergency-filter-btn"
+                      onClick={() => {
+                        const emergencyReq: PatientRequirement = {
+                          ...requirements,
+                          emergency: true,
+                          icuRequired: true,
+                          specialty: 'Emergency Care',
+                        }
+                        setRequirements(emergencyReq)
+                        runSearch(emergencyReq)
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 transition cursor-pointer"
+                    >
+                      Filter 24/7 ER Ready
+                    </button>
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-red-800 leading-relaxed font-medium">
+                  {liveInterpretation.emergencyWarning ||
+                    'Chest pain, severe breathing difficulty, or sudden weakness can be life-threatening emergencies. Seek immediate care at the nearest hospital or dial 108. Do not wait for an appointment.'}
+                </p>
+                <p className="mt-1 text-[11px] text-red-600">
+                  SwasthyaConnect AI is an informational portal and does not replace emergency medical personnel or clinical diagnosis.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Toggles */}
         <div className="mt-5 flex flex-wrap items-center justify-between gap-4 border-t border-border pt-4">
@@ -432,6 +527,74 @@ export function FindHospitalView({
                 </div>
               )}
             </>
+          )}
+
+          {/* Clinical Symptom Routing Explanation Banner */}
+          {searchMeta.symptomInterpretation && !isPending && (
+            <div
+              id="symptom-routing-explanation"
+              className={`rounded-2xl border p-4 text-xs transition ${
+                searchMeta.symptomInterpretation.isEmergency
+                  ? 'border-red-300 bg-red-50/90 text-red-950'
+                  : searchMeta.symptomInterpretation.confidence === 'unclear'
+                  ? 'border-slate-300 bg-slate-50 text-slate-800'
+                  : 'border-emerald-200 bg-emerald-50/90 text-emerald-950'
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                {searchMeta.symptomInterpretation.isEmergency ? (
+                  <AlertCircle className="size-5 shrink-0 text-red-600 mt-0.5" />
+                ) : searchMeta.symptomInterpretation.confidence === 'unclear' ? (
+                  <Info className="size-5 shrink-0 text-slate-500 mt-0.5" />
+                ) : (
+                  <Sparkles className="size-5 shrink-0 text-emerald-600 mt-0.5" />
+                )}
+                <div className="flex-1 space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-sm">
+                        {searchMeta.symptomInterpretation.inferredSpecialty
+                          ? `Care Recommendation: ${searchMeta.symptomInterpretation.inferredSpecialty}`
+                          : 'Symptom Note Review'}
+                      </span>
+                      <span className="rounded-full bg-background/90 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground border border-border">
+                        {searchMeta.symptomInterpretation.confidence} confidence
+                      </span>
+                    </div>
+                    {searchMeta.symptomInterpretation.inferredSpecialty &&
+                      requirements.specialty !== searchMeta.symptomInterpretation.inferredSpecialty && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = {
+                              ...requirements,
+                              specialty: searchMeta.symptomInterpretation!.inferredSpecialty!,
+                            }
+                            setRequirements(updated)
+                            runSearch(updated)
+                          }}
+                          className="font-bold text-primary underline text-xs hover:text-primary/80 cursor-pointer"
+                        >
+                          Filter by {searchMeta.symptomInterpretation.inferredSpecialty}
+                        </button>
+                      )}
+                  </div>
+
+                  <p className="leading-relaxed font-medium">
+                    {searchMeta.symptomInterpretation.explanation}
+                  </p>
+
+                  <div className="pt-1 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground border-t border-border/50">
+                    <span>
+                      <strong>Notice:</strong> Preliminary routing suggestion, not a clinical diagnosis.
+                    </span>
+                    <span>
+                      Hospital capabilities below are verified against official state database records.
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
           )}
 
           <div className="flex flex-col gap-4">
@@ -609,6 +772,11 @@ export function FindHospitalView({
                     {requirements.specialty && requirements.specialty !== 'All Specialties' ? (
                       <p className="mt-1 text-xs text-muted-foreground max-w-md mx-auto">
                         No facilities in <strong>{searchMeta.resolvedLocation || 'this district'}</strong> currently match the &ldquo;{requirements.specialty}&rdquo; specialty filter in the state hospital database.
+                        {searchMeta.symptomInterpretation?.inferredSpecialty && (
+                          <span className="block mt-1.5 text-[11px] text-amber-700 bg-amber-50 rounded-lg p-2 border border-amber-200">
+                            <strong>Care Note:</strong> &ldquo;{searchMeta.symptomInterpretation.inferredSpecialty}&rdquo; was suggested based on your symptom notes. If no registered facility offers this specialty in {searchMeta.resolvedLocation || 'your district'}, consider consulting a General Medicine facility or expanding your search district.
+                          </span>
+                        )}
                       </p>
                     ) : (
                       <p className="mt-1 text-xs text-muted-foreground">

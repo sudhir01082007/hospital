@@ -19,6 +19,7 @@ import {
   type Hospital,
   type PatientRequirement,
 } from '@/lib/hospital-data'
+import { interpretSymptoms, type SymptomInterpretation } from '@/lib/symptom-interpreter'
 
 // ─── District / city name normalisation ───────────────────────────────────────
 
@@ -290,8 +291,13 @@ async function fetchFromSupabase(
 
 // ─── Filter helpers ────────────────────────────────────────────────────────────
 
-function applyFilters(list: Hospital[], req: PatientRequirement): Hospital[] {
-  const spec = (req.specialty ?? '').trim().toLowerCase()
+function applyFilters(
+  list: Hospital[],
+  req: PatientRequirement,
+  effectiveSpecialty?: string | null
+): Hospital[] {
+  const chosen = effectiveSpecialty !== undefined ? effectiveSpecialty : req.specialty
+  const spec = (chosen ?? '').trim().toLowerCase()
   const isAllSpecialties = !spec || spec === 'all' || spec === 'all specialties' || spec === 'other'
 
   return list.filter((h) => {
@@ -310,11 +316,23 @@ function applyFilters(list: Hospital[], req: PatientRequirement): Hospital[] {
       } else if (spec.includes('neuro')) {
         keywordMatch = nameAndType.includes('neuro')
       } else if (spec.includes('ortho')) {
-        keywordMatch = nameAndType.includes('ortho')
+        keywordMatch =
+          nameAndType.includes('ortho') || nameAndType.includes('bone') || nameAndType.includes('joint')
       } else if (spec.includes('general')) {
-        keywordMatch = nameAndType.includes('general') || nameAndType.includes('medicine') || nameAndType.includes('hospital')
+        keywordMatch =
+          nameAndType.includes('general') ||
+          nameAndType.includes('medicine') ||
+          nameAndType.includes('hospital') ||
+          nameAndType.includes('health') ||
+          nameAndType.includes('nursing home')
       } else if (spec.includes('emergency')) {
-        keywordMatch = h.emergency || /emergency|trauma|critical\s*care|medical\s*college|general\s*hospital|super\s*speciality/i.test(nameAndType)
+        keywordMatch =
+          h.emergency ||
+          /emergency|trauma|critical\s*care|medical\s*college|general\s*hospital|super\s*speciality/i.test(nameAndType)
+      } else if (spec.includes('ophthalm') || spec.includes('eye')) {
+        keywordMatch = nameAndType.includes('eye') || nameAndType.includes('ophthalm') || nameAndType.includes('vision')
+      } else if (spec.includes('derma') || spec.includes('skin')) {
+        keywordMatch = nameAndType.includes('derma') || nameAndType.includes('skin')
       }
       specialtyMatch = inDepts || keywordMatch
     }
@@ -348,6 +366,8 @@ export type HospitalSearchResult = {
   noDataForLocation: boolean
   /** True when the location string is unrecognised */
   unknownLocation: boolean
+  /** Preliminary clinical symptom interpretation if notes were entered */
+  symptomInterpretation?: SymptomInterpretation
 }
 
 /**
@@ -357,6 +377,24 @@ export type HospitalSearchResult = {
  */
 export async function searchHospitals(req: PatientRequirement): Promise<HospitalSearchResult> {
   const rawLocation = (req.location ?? '').trim()
+
+  // ── Interpret clinical symptoms / notes if present ───────────────────────
+  const interpretation = req.notes?.trim() ? interpretSymptoms(req.notes) : undefined
+
+  // Determine effective specialty:
+  // If user left specialty as "All Specialties" (or empty) and entered symptoms,
+  // route using the symptom-interpreted specialty.
+  // If user explicitly chose a specific specialty from the dropdown, respect user's choice.
+  const hasExplicitSpecialty = Boolean(req.specialty && req.specialty !== 'All Specialties')
+  const effectiveSpecialty = hasExplicitSpecialty
+    ? req.specialty
+    : interpretation?.suggestedSpecialty ?? req.specialty
+
+  // If symptoms indicate an urgent emergency, ensure emergency requirement is activated
+  const effectiveReq: PatientRequirement = {
+    ...req,
+    emergency: req.emergency || Boolean(interpretation?.isEmergency),
+  }
 
   // ── 1. Empty input → fetch top hospitals from Supabase, fallback to static ──
   if (!rawLocation) {
@@ -368,26 +406,28 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
 
       if (!error && data && data.length > 0) {
         const dbList = data.map(mapRow)
-        const filtered = applyFilters(dbList, req).sort((a, b) => b.score - a.score)
+        const filtered = applyFilters(dbList, effectiveReq, effectiveSpecialty).sort((a, b) => b.score - a.score)
         return {
           hospitals: filtered,
           resolvedLocation: 'Tamil Nadu',
           fromDatabase: true,
           noDataForLocation: false,
           unknownLocation: false,
+          symptomInterpretation: interpretation,
         }
       }
     } catch (err) {
       console.warn('[hospital-search] Empty location Supabase fallback:', err)
     }
 
-    const filtered = applyFilters(STATIC_HOSPITALS, req).sort((a, b) => b.score - a.score)
+    const filtered = applyFilters(STATIC_HOSPITALS, effectiveReq, effectiveSpecialty).sort((a, b) => b.score - a.score)
     return {
       hospitals: filtered,
       resolvedLocation: 'Tamil Nadu',
       fromDatabase: false,
       noDataForLocation: false,
       unknownLocation: false,
+      symptomInterpretation: interpretation,
     }
   }
 
@@ -396,25 +436,29 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
     const dbResults = await fetchFromSupabase(rawLocation, true)
     if (dbResults === null) {
       // DB unreachable
-      const staticFiltered = applyFilters(filterStaticByLocation(rawLocation), req).sort(
-        (a, b) => b.score - a.score
-      )
+      const staticFiltered = applyFilters(
+        filterStaticByLocation(rawLocation),
+        effectiveReq,
+        effectiveSpecialty
+      ).sort((a, b) => b.score - a.score)
       return {
         hospitals: staticFiltered,
         resolvedLocation: rawLocation,
         fromDatabase: false,
         noDataForLocation: staticFiltered.length === 0,
         unknownLocation: false,
+        symptomInterpretation: interpretation,
       }
     }
     if (dbResults.length > 0) {
-      const filtered = applyFilters(dbResults, req).sort((a, b) => b.score - a.score)
+      const filtered = applyFilters(dbResults, effectiveReq, effectiveSpecialty).sort((a, b) => b.score - a.score)
       return {
         hospitals: filtered,
         resolvedLocation: rawLocation,
         fromDatabase: true,
         noDataForLocation: false,
         unknownLocation: false,
+        symptomInterpretation: interpretation,
       }
     }
     return {
@@ -423,6 +467,7 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
       fromDatabase: true,
       noDataForLocation: true,
       unknownLocation: false,
+      symptomInterpretation: interpretation,
     }
   }
 
@@ -434,24 +479,27 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
 
     if (dbResults === null) {
       // DB unreachable — fall back to static
-      const staticFiltered = applyFilters(filterStaticByLocation(canonical), req).sort(
-        (a, b) => b.score - a.score
-      )
+      const staticFiltered = applyFilters(
+        filterStaticByLocation(canonical),
+        effectiveReq,
+        effectiveSpecialty
+      ).sort((a, b) => b.score - a.score)
       return {
         hospitals: staticFiltered,
         resolvedLocation: canonical,
         fromDatabase: false,
         noDataForLocation: staticFiltered.length === 0,
         unknownLocation: false,
+        symptomInterpretation: interpretation,
       }
     }
 
     if (dbResults.length > 0) {
-      const filtered = applyFilters(dbResults, req).sort((a, b) => b.score - a.score)
+      const filtered = applyFilters(dbResults, effectiveReq, effectiveSpecialty).sort((a, b) => b.score - a.score)
       console.log(
-        `[Hospital Search Trace] District: "${canonical}" | Filter Specialty: "${req.specialty || 'None'}" | Salem/District DB records: ${dbResults.length} | Post-filter matches: ${filtered.length}`
+        `[Hospital Search Trace] District: "${canonical}" | Filter Specialty: "${effectiveSpecialty || 'None'}" | Salem/District DB records: ${dbResults.length} | Post-filter matches: ${filtered.length}`
       )
-      if (req.specialty?.toLowerCase().includes('cardio')) {
+      if (effectiveSpecialty?.toLowerCase().includes('cardio')) {
         console.log(`[Hospital Search Trace] Cardiology matches for "${canonical}": ${filtered.length}`)
       }
       return {
@@ -460,6 +508,7 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
         fromDatabase: true,
         noDataForLocation: false,
         unknownLocation: false,
+        symptomInterpretation: interpretation,
       }
     }
 
@@ -470,21 +519,22 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
       fromDatabase: true,
       noDataForLocation: true,
       unknownLocation: false,
+      symptomInterpretation: interpretation,
     }
   }
 
   // ── 4. Unrecognised location — try Supabase fuzzy search ────────────────
-  // ── 4. Unrecognised location — try Supabase fuzzy search ────────────────
   const dbResults = await fetchFromSupabase(rawLocation, false)
   if (dbResults !== null) {
     if (dbResults.length > 0) {
-      const filtered = applyFilters(dbResults, req).sort((a, b) => b.score - a.score)
+      const filtered = applyFilters(dbResults, effectiveReq, effectiveSpecialty).sort((a, b) => b.score - a.score)
       return {
         hospitals: filtered,
         resolvedLocation: rawLocation,
         fromDatabase: true,
         noDataForLocation: false,
         unknownLocation: false,
+        symptomInterpretation: interpretation,
       }
     }
     // DB reachable but no rows — indicate no data for this location
@@ -494,6 +544,7 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
       fromDatabase: true,
       noDataForLocation: true,
       unknownLocation: false,
+      symptomInterpretation: interpretation,
     }
   }
   // DB unreachable — treat as unknown location
@@ -503,6 +554,7 @@ export async function searchHospitals(req: PatientRequirement): Promise<Hospital
     fromDatabase: false,
     noDataForLocation: false,
     unknownLocation: true,
+    symptomInterpretation: interpretation,
   }
 }
 
@@ -514,5 +566,16 @@ export function searchHospitalsSync(req: PatientRequirement): Hospital[] {
     ? filterStaticByLocation(resolveDistrict(rawLocation) ?? rawLocation)
     : STATIC_HOSPITALS
 
-  return applyFilters(pool, req).sort((a, b) => b.score - a.score)
+  const interpretation = req.notes?.trim() ? interpretSymptoms(req.notes) : undefined
+  const hasExplicitSpecialty = Boolean(req.specialty && req.specialty !== 'All Specialties')
+  const effectiveSpecialty = hasExplicitSpecialty
+    ? req.specialty
+    : interpretation?.suggestedSpecialty ?? req.specialty
+
+  const effectiveReq: PatientRequirement = {
+    ...req,
+    emergency: req.emergency || Boolean(interpretation?.isEmergency),
+  }
+
+  return applyFilters(pool, effectiveReq, effectiveSpecialty).sort((a, b) => b.score - a.score)
 }

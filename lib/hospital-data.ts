@@ -282,6 +282,8 @@ export const specialties = [
   'Orthopedics',
   'General Medicine',
   'Emergency Care',
+  'Ophthalmology',
+  'Dermatology',
   'Other',
 ]
 
